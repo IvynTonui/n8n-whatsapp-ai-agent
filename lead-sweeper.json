@@ -1,0 +1,222 @@
+{
+  "name": "Lead Sweeper — Abandoned Enquiries",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "251611e8-8bf8-4057-9718-c74d211437cb"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Abandoned quote/partner enquiries: the customer engaged, gave us at\n-- least a phone number and usually more, then stopped replying without\n-- completing the flow. These never reach the Quote/Partner tabs (those are\n-- written only on successful submission), so sales has never seen them.\n--\n-- Deliberately EVENT-FREE: a sweeper catches plain abandonment (customer\n-- just stops replying), which is the most common outcome and which no\n-- exit/handoff hook can ever catch -- there is no event to hang off.\n--\n-- 30 min idle matches the Decision Node's own conversation-timeout, so a\n-- lead is only swept once the session is genuinely dead, never mid-chat.\n-- The 7-day floor stops a backfill avalanche on first run and keeps the\n-- follow-up list fresh; widen it ONCE deliberately if you want history.\nSELECT\n  phone,\n  current_state,\n  current_context,\n  created_at,\n  updated_at,\n  ROUND(EXTRACT(EPOCH FROM (NOW() - updated_at)) / 60) AS minutes_idle\nFROM app_bot_sessions\nWHERE current_state IN ('QUOTE_COLLECTING', 'QUOTE_CONFIRMING', 'PARTNER_COLLECTING', 'PARTNER_CONFIRMING')\n  AND updated_at < NOW() - INTERVAL '30 minutes'\n  AND updated_at > NOW() - INTERVAL '7 days'\n  AND COALESCE(current_context->>'leadExported', '') <> 'true'\nORDER BY updated_at DESC\nLIMIT 100;",
+        "options": {}
+      },
+      "name": "Find Abandoned Enquiries",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        224,
+        0
+      ],
+      "id": "ae6b08eb-263c-4fea-b60e-d0ed4c90aeb9",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Demo postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// One output item per lead, shaped for the Leads tab. Returns [] when\n// there's nothing to sweep (alwaysOutputData on the query means we can get\n// a single empty item through) -- downstream nodes then simply don't run.\nconst rows = $input.all().map(i => i.json).filter(r => r && r.phone);\n\nconst out = [];\nfor (const r of rows) {\n  let ctx = r.current_context;\n  if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch (e) { ctx = {}; } }\n  ctx = ctx || {};\n  const f = ctx.fields || {};\n\n  const isPartner = String(r.current_state || '').indexOf('PARTNER') === 0;\n  const val = (v) => (v === null || v === undefined || v === '') ? '' : String(v);\n\n  // Everything actually captured, so sales can see the real substance even\n  // for fields that have no dedicated column below.\n  const captured = {};\n  for (const k of Object.keys(f)) {\n    if (f[k] !== null && f[k] !== undefined && f[k] !== '' && k !== 'phone') captured[k] = f[k];\n  }\n  const capturedCount = Object.keys(captured).length;\n\n  const stageLabel = {\n    QUOTE_COLLECTING: 'Quote - answering questions',\n    QUOTE_CONFIRMING: 'Quote - reached confirmation, never confirmed',\n    PARTNER_COLLECTING: 'Partner - answering questions',\n    PARTNER_CONFIRMING: 'Partner - reached confirmation, never confirmed'\n  }[r.current_state] || r.current_state;\n\n  out.push({ json: {\n    phone: r.phone,\n    enquiry_type: isPartner ? 'Partner' : 'Quote',\n    stage: stageLabel,\n    name: val(f.customer_name || f.contact_name),\n    destination_country: val(f.destination_country),\n    weight_kg: val(f.weight_kg),\n    volume_cbm: val(f.volume_cbm),\n    cargo_category: val(f.cargo_category),\n    shipping_method: val(f.shipping_method),\n    business_name: val(f.business_name),\n    email: val(f.email),\n    based_in: [val(f.city), val(f.country)].filter(Boolean).join(', '),\n    details_captured: capturedCount ? JSON.stringify(captured) : '',\n    fields_captured_count: capturedCount,\n    first_seen: r.created_at,\n    last_activity: r.updated_at,\n    hours_since_last_activity: Math.round((Number(r.minutes_idle) || 0) / 6) / 10,\n    lead_status: capturedCount > 0 ? 'Abandoned - has details, follow up' : 'Abandoned - no details captured',\n    follow_up_status: '',\n    owner: '',\n    internal_notes: ''\n  } });\n}\nreturn out;"
+      },
+      "name": "Format Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "44575b4a-3ad5-4fbd-8b36-68d9e93ce0a2"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "EXAMPLE_SHEET_ID_00000000000000000000",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $json.phone }}",
+            "name": "={{ $json.name }}",
+            "enquiry_type": "={{ $json.enquiry_type }}",
+            "stage": "={{ $json.stage }}",
+            "destination_country": "={{ $json.destination_country }}",
+            "weight_kg": "={{ $json.weight_kg }}",
+            "volume_cbm": "={{ $json.volume_cbm }}",
+            "cargo_category": "={{ $json.cargo_category }}",
+            "shipping_method": "={{ $json.shipping_method }}",
+            "business_name": "={{ $json.business_name }}",
+            "email": "={{ $json.email }}",
+            "based_in": "={{ $json.based_in }}",
+            "details_captured": "={{ $json.details_captured }}",
+            "first_seen": "={{ $json.first_seen }}",
+            "last_activity": "={{ $json.last_activity }}",
+            "lead_status": "={{ $json.lead_status }}",
+            "follow_up_status": "={{ $json.follow_up_status }}",
+            "owner": "={{ $json.owner }}",
+            "internal_notes": "={{ $json.internal_notes }}"
+          },
+          "matchingColumns": [
+            "phone"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "name": "Write Lead to Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        672,
+        0
+      ],
+      "id": "6c63fca0-6e41-463e-bdf7-601789000768",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Demo googleSheetsOAuth2Api"
+        }
+      },
+      "notes": "SETUP: assign the same Google Sheets credential the main workflow uses (credentials never travel through workflow JSON exports), and create a 'Leads' tab whose header row matches the column keys mapped here. appendOrUpdate on phone = one living row per prospect, refreshed with their latest details rather than a new row per sweep. | FIXED 2026-08-13: was onError continueRegularOutput, which meant a FAILED sheet write still flowed on to Mark Lead Exported -- leads got flagged as exported without ever reaching the sheet, permanently dropped from future sweeps. Now the default (stop on error) so a failed write leaves the lead unmarked and the next sweep retries it."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Mark this session as exported so the next sweep skips it. Kept in\n-- current_context (not a new table) so it's wiped automatically whenever\n-- the session resets -- meaning a prospect who comes back later and\n-- abandons AGAIN is correctly swept again as fresh activity.\nUPDATE app_bot_sessions\nSET current_context = jsonb_set(current_context, '{leadExported}', 'true'::jsonb, true)\nWHERE phone = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.phone }}"
+        }
+      },
+      "name": "Mark Lead Exported",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        896,
+        0
+      ],
+      "id": "b36a7261-68f9-4e42-aaa5-867eb5d71e6f",
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Demo postgres"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Runs once per swept lead. Deliberately does NOT touch updated_at -- that column is the conversation-activity clock the Decision Node reads for its 30-minute timeout, and bumping it here would make a dead session look alive."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Outbound hashes are only consulted for 15 minutes after a send; a day\n-- of retention is already generous. Pruned here rather than in the main\n-- workflow so the customer-facing path never carries housekeeping cost.\nDELETE FROM app_bot_outbound WHERE created_at < NOW() - INTERVAL '1 day';",
+        "options": {}
+      },
+      "name": "Prune Outbound Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        224,
+        180
+      ],
+      "id": "df9e5608-c836-4f5d-9380-a962a9256b66",
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Demo postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Every 30 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Find Abandoned Enquiries",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prune Outbound Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Abandoned Enquiries": {
+      "main": [
+        [
+          {
+            "node": "Format Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Leads": {
+      "main": [
+        [
+          {
+            "node": "Write Lead to Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Lead to Sheets": {
+      "main": [
+        [
+          {
+            "node": "Mark Lead Exported",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {}
+}

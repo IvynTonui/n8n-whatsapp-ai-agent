@@ -1,0 +1,210 @@
+{
+  "name": "Session Heartbeat",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "name": "Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "ce90a2f6-3df4-4d03-af59-62f0c7b52a21"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "TODO_GATEWAY_STATUS_URL",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer TODO_GATEWAY_API_KEY"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Check the WhatsApp gateway Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "d9b80e77-ab74-4121-be89-d25bf370c5e4",
+      "onError": "continueErrorOutput",
+      "notes": "TODO(heartbeat-endpoint): fill in the real the WhatsApp gateway session-status URL and API key from the the WhatsApp gateway dashboard/docs before activating -- both are placeholders on purpose (never guess an endpoint). The auth header name/scheme may also differ; match whatever the dashboard shows. Error output (timeout/unreachable) routes to the same alert path: a check that cannot run is itself an alert."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Evaluate the the WhatsApp gateway status response. TODO(heartbeat-endpoint): adjust\n// the field checks below to the WhatsApp gateway's actual response shape once the real\n// endpoint is filled in -- this covers the common shapes, but VERIFY against\n// one real response before trusting it. Fails CLOSED: anything that doesn't\n// positively look connected counts as down.\nconst r = $input.first().json;\nconst candidates = [r.status, r.state, r.data && r.data.status, r.data && r.data.state, r.session && r.session.status];\nconst looksConnected = candidates.some(v => typeof v === 'string' && /^(connected|open|online|authenticated|working)$/i.test(v));\nreturn { json: {\n  down: !looksConnected,\n  alertText: looksConnected ? '' : ('\\ud83d\\udea8 the WhatsApp gateway session looks DOWN (status response did not report connected). The bot may be silent \\u2014 the product owner may need to rescan the QR via disconnect/reconnect. Raw status snippet: ' + JSON.stringify(r).substring(0, 300))\n} };"
+      },
+      "name": "Evaluate Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -80
+      ],
+      "id": "437a8d83-9cf4-4170-95b3-5a75aae8df2e"
+    },
+    {
+      "parameters": {
+        "jsCode": "// The health check itself failed (timeout / DNS / non-2xx). That's an\n// alert in its own right -- a check that can't run tells us nothing, and\n// silence is exactly the failure mode this workflow exists to catch.\nconst e = $input.first().json;\nreturn { json: {\n  down: true,\n  alertText: '\\u26a0\\ufe0f the WhatsApp gateway health check FAILED to run (endpoint unreachable or errored) \\u2014 cannot confirm the bot is alive. Error: ' + (((e.error && e.error.message) || e.message) || 'unknown')\n} };"
+      },
+      "name": "Prepare Check Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        80
+      ],
+      "id": "566775ff-ad84-4989-b7d6-b949b7a5c1fa"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "is-down",
+              "leftValue": "={{ String($json.down) }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Is Session Down?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "ed2c7597-259f-44b5-928b-fd73c9af5204",
+      "notes": "Healthy checks end here silently -- no alert spam. String() comparison per the documented strict-type IF gotcha."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.example.com/alerts/send?key=FAKE_WEBHOOK_KEY",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"msgtype\": \"text\",\n  \"text\": {\n    \"content\": {{ JSON.stringify($json.alertText) }},\n    \"mentioned_mobile_list\": [\"@all\"]\n  }\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Notify Devs (Heartbeat)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        -80
+      ],
+      "id": "43175513-45aa-4c3a-aba9-814d7e18a171",
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Every 30 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Check the WhatsApp gateway Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check the WhatsApp gateway Session": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Check Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Status": {
+      "main": [
+        [
+          {
+            "node": "Is Session Down?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Check Failure": {
+      "main": [
+        [
+          {
+            "node": "Is Session Down?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Session Down?": {
+      "main": [
+        [
+          {
+            "node": "Notify Devs (Heartbeat)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {}
+}

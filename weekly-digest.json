@@ -1,0 +1,166 @@
+{
+  "name": "Weekly Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1"
+            }
+          ]
+        }
+      },
+      "name": "Every Monday 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "72c0b9cb-ecbd-402f-88e7-e8cd8014d6d1",
+      "notes": "Runs in the n8n SERVER's timezone -- check the instance timezone and shift the cron hour if you want this to land at 09:00 for the product owner (overseas, UTC+8)."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Weekly counts by event type. VERIFY before first activation that the\n-- timestamp column on app_bot_events is really named created_at\n-- (\\d app_bot_events) -- the insert statements in the main workflow rely\n-- on a DB-side default for it, so the name was never spelled out there.\nSELECT event_key, COUNT(*) AS n\nFROM app_bot_events\nWHERE event_category = 'the AI service'\n  AND created_at > NOW() - INTERVAL '7 days'\nGROUP BY event_key\nORDER BY n DESC;",
+        "options": {}
+      },
+      "name": "Fetch Weekly Counts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        224,
+        0
+      ],
+      "id": "b9d48e40-3fb6-4bef-ac84-7fd09cda9435",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Demo postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- The questions the AI service couldn't answer this week, most frequent first.\n-- event_name holds the first 255 chars of the customer's question.\nSELECT event_name AS question, COUNT(*) AS n\nFROM app_bot_events\nWHERE event_category = 'the AI service'\n  AND event_key = 'unanswered'\n  AND created_at > NOW() - INTERVAL '7 days'\nGROUP BY event_name\nORDER BY n DESC, question\nLIMIT 30;",
+        "options": {}
+      },
+      "name": "Fetch Unanswered Questions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        448,
+        0
+      ],
+      "id": "cab4b1a0-2845-4b61-b6fe-27fb784e4202",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Demo postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format the weekly digest. Phase 2 build-order item 8 (\"weekly\n// unanswered-questions digest for the product owner\") plus basic funnel counts.\nconst LABELS = {\n  quote_submitted: 'Quotes submitted',\n  partner_submitted: 'Partner applications submitted',\n  unanswered: 'Questions the bot could not answer',\n  quote_handoff: 'Quote-flow handoffs to a human',\n  partner_handoff: 'Partner-flow handoffs to a human',\n  tracking_handoff: 'Tracking handoffs to a human',\n  quote_not_priceable: 'Quotes needing manual pricing',\n  human_requested: 'Direct \"talk to us\" requests',\n  human_requested_midflow: 'Mid-flow \"talk to us\" requests'\n};\nconst counts = $('Fetch Weekly Counts').all().map(i => i.json).filter(r => r && r.event_key);\nconst questions = $input.all().map(i => i.json).filter(r => r && r.question);\n\nconst lines = ['\\ud83d\\udcca the AI service weekly summary (last 7 days)', ''];\nif (counts.length === 0) {\n  lines.push('No logged activity this week.');\n} else {\n  for (const c of counts) {\n    lines.push('\\u2022 ' + (LABELS[c.event_key] || c.event_key) + ': ' + c.n);\n  }\n}\nlines.push('');\nif (questions.length > 0) {\n  lines.push('\\u2753 Top unanswered questions (for the knowledge base):');\n  questions.slice(0, 15).forEach((q, i) => {\n    lines.push((i + 1) + '. ' + q.question + (Number(q.n) > 1 ? '  (\\u00d7' + q.n + ')' : ''));\n  });\n} else {\n  lines.push('\\u2705 No unanswered questions this week.');\n}\nreturn { json: { digest: lines.join('\\n') } };"
+      },
+      "name": "Format Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        0
+      ],
+      "id": "11dee660-9c30-4714-b7c9-2c0546c62b8c"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.example.com/alerts/send?key=FAKE_WEBHOOK_KEY",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"msgtype\": \"text\",\n  \"text\": {\n    \"content\": {{ JSON.stringify($json.digest) }}\n  }\n}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "name": "Send Digest (the team chat)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "6e4810c7-30a2-4504-a9f1-6d86f04c52aa",
+      "onError": "continueRegularOutput",
+      "notes": "Goes to the shared the AI service Alerts the team chat group (same webhook as the main workflow). No @all mention -- this is a routine digest, not an alert."
+    }
+  ],
+  "connections": {
+    "Every Monday 09:00": {
+      "main": [
+        [
+          {
+            "node": "Fetch Weekly Counts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Weekly Counts": {
+      "main": [
+        [
+          {
+            "node": "Fetch Unanswered Questions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Unanswered Questions": {
+      "main": [
+        [
+          {
+            "node": "Format Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Digest": {
+      "main": [
+        [
+          {
+            "node": "Send Digest (the team chat)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {}
+}

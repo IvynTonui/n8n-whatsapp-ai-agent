@@ -1,0 +1,243 @@
+{
+  "name": "Lead Priority — Daily Call List",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Every Morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "156e0a2e-dc62-45a1-b35a-f140d3af457b",
+      "notes": "Runs in the n8n server timezone. Aim for it to land before the team starts calling."
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "EXAMPLE_SHEET_ID_00000000000000000000",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Priority Calls",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "name": "Read Existing List",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        224,
+        0
+      ],
+      "id": "48ca5315-78a2-4d3d-8ac1-8bad29761a77",
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Demo googleSheetsOAuth2Api"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Read FIRST so anyone the team has already phoned drops off today's list -- the sheet is the single source of truth for human follow-up state. Fails soft: on the very first run the tab may not exist yet, and an empty read simply means nobody has been contacted. | FIXED 2026-08-18 (found on the first real run): an n8n Postgres node executes ONCE PER INCOMING ITEM. Chained after a node returning 1,390 rows this query ran 1,390 times and produced 139,000 output items, flooding the production database with identical reads. executeOnce pins it to a single run; its output is unaffected because Score & Rank reads it by name with .all().",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Conversation transcripts. Lives in the AI serviceserviceprod, so it CANNOT be\n-- joined in SQL to the sessions/orders data -- that merge happens in the\n-- Score & Rank node. Covers everything routed through /ai/chat; the\n-- deterministic partner questions and bare digit presses never reach it.\nSELECT\n  session_id,\n  COUNT(*)                                                              AS turns,\n  MIN(created_at)                                                       AS first_at,\n  MAX(created_at)                                                       AS last_at,\n  LEFT(COALESCE(string_agg(content, ' ~~ ' ORDER BY id)\n       FILTER (WHERE role = 'user'), ''), 4000)                         AS user_text,\n  (array_agg(content ORDER BY id) FILTER (WHERE role = 'user'))[1]      AS first_user_message\nFROM rag.conversation_history\nWHERE LEFT(session_id, 3) = 'wa_'\n  AND created_at > NOW() - INTERVAL '45 days'\nGROUP BY session_id;",
+        "options": {}
+      },
+      "name": "Fetch Transcripts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        448,
+        0
+      ],
+      "id": "7f937b8a-7053-41c2-8a67-43d400b56313",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Demo postgres"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "executeOnce": true,
+      "notes": " | FIXED 2026-08-18 (found on the first real run): an n8n Postgres node executes ONCE PER INCOMING ITEM. Chained after a node returning 1,390 rows this query ran 1,390 times and produced 139,000 output items, flooding the production database with identical reads. executeOnce pins it to a single run; its output is unaffected because Score & Rank reads it by name with .all()."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Everything from the logistics database: bot session state, captured\n-- fields, paid-ad attribution, registration and order history.\n-- Phone matching normalises BOTH sides to the last 9 digits -- verified\n-- against real data 2026-08-14 (we store 10000000000, auth_user stores\n-- 0700000000 / +233 54 968 8677, sometimes two numbers split by \"/\").\nWITH u AS (\n  SELECT a.id, regexp_replace(part, '[^0-9]', '', 'g') AS digits\n  FROM auth_user a,\n       LATERAL unnest(string_to_array(COALESCE(a.phone_number, ''), '/')) AS part\n  WHERE a.phone_number IS NOT NULL AND a.phone_number <> ''\n),\nun AS (\n  SELECT DISTINCT id, RIGHT(digits, 9) AS tail9\n  FROM u WHERE LENGTH(digits) >= 9\n),\nord AS (\n  SELECT un.tail9, COUNT(*) AS order_count, MAX(o.created_on) AS last_order\n  FROM un\n  JOIN orders o ON o.user_id = un.id AND NOT COALESCE(o.deleted, false)\n  GROUP BY un.tail9\n)\nSELECT\n  s.phone,\n  s.current_state,\n  s.current_context,\n  s.created_at   AS first_seen,\n  s.updated_at   AS last_activity,\n  EXISTS (SELECT 1 FROM un WHERE un.tail9 = RIGHT(s.phone, 9))                     AS is_registered,\n  COALESCE((SELECT o2.order_count FROM ord o2 WHERE o2.tail9 = RIGHT(s.phone, 9)), 0) AS order_count,\n  ls.conversion_source,\n  ls.source_app,\n  ls.source_id,\n  ls.ad_title\nFROM app_bot_sessions s\nLEFT JOIN app_lead_source ls ON ls.phone = s.phone\nWHERE LENGTH(s.phone) BETWEEN 8 AND 15;",
+        "options": {}
+      },
+      "name": "Fetch Lead Context",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [
+        672,
+        0
+      ],
+      "id": "1f789dea-de9c-4ae4-9f1a-976c1d6c3285",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_ME",
+          "name": "Demo postgres"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "executeOnce": true,
+      "notes": " | FIXED 2026-08-18 (found on the first real run): an n8n Postgres node executes ONCE PER INCOMING ITEM. Chained after a node returning 1,390 rows this query ran 1,390 times and produced 139,000 output items, flooding the production database with identical reads. executeOnce pins it to a single run; its output is unaffected because Score & Rank reads it by name with .all()."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Score & Rank — the product owner's Phase 1 scoring, applied to real conversations.\n// ============================================================\n// Rules rather than an LLM ON PURPOSE: when the product owner asks \"why is this person\n// ranked third?\", every point is traceable to one of the signals from his\n// own document, and he can tune the weights. An AI-written summary can be\n// layered on later -- but it must use a SEPARATE session id, because\n// calling /ai/chat with the customer's own wa_<phone> would write our\n// analysis into their live conversation memory.\n// ============================================================\n\n// Staff, test and company numbers. EXTEND THIS LIST rather than filtering\n// by hand in the sheet.\nconst INTERNAL = ['10000000001', '10000000000', '10000000002'];\n\nconst DAILY_LIMIT = 10; // the team's stated call capacity\n\n// FIXED 2026-08-18 (found on the first real run): a session with 1018 turns\n// in 79 minutes ranked 4th, and its \"user\" messages were OUR OWN bot menu\n// text -- something replays our output back through /ai/chat under\n// role=user, so the scorer was matching our own keywords and awarding\n// points for them. Two independent guards, because either alone could be\n// fooled: a human does not send a thousand messages in an hour, and a real\n// customer does not quote our menu back at us.\nconst MAX_HUMAN_TURNS = 100;\nconst BOT_FINGERPRINT = /(How can we help today|Track my shipment|Get a shipping quote|Become an ACME Partner|Welcome to ACME|Thanks! To get you a quote)/i;\n\nconst transcripts = $('Fetch Transcripts').all().map(i => i.json).filter(r => r && r.session_id);\nconst contexts = $('Fetch Lead Context').all().map(i => i.json).filter(r => r && r.phone);\nconst existing = $('Read Existing List').all().map(i => i.json).filter(r => r && r.phone);\n\n// Anyone the team has already picked up drops off the list permanently.\nconst contacted = new Set(\n  existing.filter(r => String(r.call_status || '').trim() !== '').map(r => String(r.phone).trim())\n);\n\nconst tByPhone = {};\nfor (const t of transcripts) {\n  const phone = String(t.session_id).slice(3);\n  tByPhone[phone] = t;\n}\nconst cByPhone = {};\nfor (const c of contexts) cByPhone[String(c.phone)] = c;\n\nconst allPhones = new Set([...Object.keys(tByPhone), ...Object.keys(cByPhone)]);\n\nconst SIGNALS = [\n  { key: 'price_or_transit', points: 2, label: 'asked about price or transit time',\n    re: /\\b(price|prices|pricing|cost|costs|rate|rates|charge|how much|quotation|transit|how long|how many days|duration|lead time)\\b/i },\n  { key: 'services', points: 2, label: 'asked about customs / warehousing / delivery / COD',\n    re: /\\b(customs|clearance|duty|duties|tax|warehouse|storage|door to door|door-to-door|last mile|delivery fee|cod|cash on delivery)\\b/i },\n  { key: 'address', points: 2, label: 'asked for our office or warehouse address',\n    re: /\\b(address|office|located|location|where are you|pick ?up point|drop ?off)\\b/i },\n  { key: 'shipping_soon', points: 2, label: 'says they are shipping soon',\n    re: /\\b(soon|urgent|urgently|asap|immediately|right away|next week|this week|this month|ready to ship|want to ship now)\\b/i },\n  { key: 'how_to_ship', points: 1, label: 'asked how to ship from overseas',\n    re: /\\b(how (do|can|would) i ship|how to ship|start shipping|ship from china|import from china)\\b/i },\n  { key: 'cargo_text', points: 1, label: 'described cargo in conversation',\n    re: /\\b(\\d+\\s?(kg|kgs|cbm|tons?|pieces|pcs|cartons?|boxes)|electronics|phone parts|batteries|clothes|furniture|machinery|spare parts)\\b/i }\n];\n\nconst out = [];\n\nfor (const phone of allPhones) {\n  if (INTERNAL.includes(phone)) continue;                 // staff / test numbers\n  if (phone.length < 8 || phone.length > 15) continue;    // junk from the old group-JID bug\n  if (contacted.has(phone)) continue;                     // already phoned\n\n  const t = tByPhone[phone] || {};\n  const c = cByPhone[phone] || {};\n\n  // the product owner, 2026-08-14: Phase 1 is shipping customers only.\n  const state = String(c.current_state || '');\n  if (state.indexOf('PARTNER') === 0) continue;\n\n  const orderCount = Number(c.order_count || 0);\n  if (orderCount > 0) continue;   // already an active shipper, not a lead\n\n  let ctx = c.current_context;\n  if (typeof ctx === 'string') { try { ctx = JSON.parse(ctx); } catch (e) { ctx = {}; } }\n  const f = (ctx && ctx.fields) || {};\n\n  const text = String(t.user_text || '');\n  const turns = Number(t.turns || 0);\n\n  let score = 0;\n  const why = [];\n  function award(points, label) { score += points; why.push(label); }\n\n  // Strongest signal: they have actual goods with numbers attached.\n  const hasCargoFields = ['weight_kg', 'volume_cbm', 'cargo_category', 'destination_country']\n    .some(k => f[k] !== undefined && f[k] !== null && f[k] !== '');\n  if (hasCargoFields) award(3, 'gave cargo details');\n\n  if (state.indexOf('QUOTE') === 0) award(3, 'started a quote');\n  if (state === 'QUOTE_CONFIRMING') award(2, 'reached the confirmation step but never submitted');\n\n  for (const s of SIGNALS) {\n    if (s.re.test(text)) award(s.points, s.label);\n  }\n\n  if (c.conversion_source) award(1, 'came from a paid ad');\n  if (turns >= 6) award(1, 'engaged conversation (' + turns + ' turns)');\n\n  // Not a genuine human conversation -- see MAX_HUMAN_TURNS note above.\n  if (turns > MAX_HUMAN_TURNS) continue;\n  if (BOT_FINGERPRINT.test(text)) continue;\n\n  if (score <= 0) continue;\n\n  // Recalibrated 2026-08-18 against the first real run: the original 7/4\n  // cut-offs made 8 of 10 leads \"HOT\", which is no triage at all. Real\n  // scores ran 12,11,11,9,8,8,8,7,6,6 -- these thresholds put the genuinely\n  // exceptional ones at the top and leave the rest as solid follow-ups.\n  const tier = score >= 10 ? 'HOT' : (score >= 6 ? 'WARM' : 'COLD');\n\n  const bits = [];\n  if (f.destination_country) bits.push('to ' + f.destination_country);\n  if (f.weight_kg) bits.push(f.weight_kg + 'kg');\n  if (f.volume_cbm) bits.push(f.volume_cbm + ' CBM');\n  if (f.cargo_category) bits.push(String(f.cargo_category));\n  if (f.shipping_method) bits.push(String(f.shipping_method) + ' freight');\n  const firstMsg = String(t.first_user_message || '').replace(/\\s+/g, ' ').slice(0, 160);\n  const summary = (bits.length ? bits.join(', ') + '. ' : '') + (firstMsg ? 'First said: \"' + firstMsg + '\"' : '');\n\n  out.push({\n    phone: phone,\n    name: f.customer_name || f.contact_name || '',\n    score: score,\n    tier: tier,\n    status: c.is_registered === true ? 'Registered - never ordered' : 'Not registered',\n    summary: summary,\n    why: why.join('; '),\n    destination_country: f.destination_country || '',\n    weight_kg: f.weight_kg === undefined || f.weight_kg === null ? '' : f.weight_kg,\n    volume_cbm: f.volume_cbm === undefined || f.volume_cbm === null ? '' : f.volume_cbm,\n    cargo_category: f.cargo_category || '',\n    shipping_method: f.shipping_method || '',\n    ad_source: c.source_app || c.conversion_source || '',\n    ad_name: c.ad_title || '',\n    ad_id: c.source_id || '',\n    turns: turns,\n    first_seen: c.first_seen || t.first_at || '',\n    last_activity: c.last_activity || t.last_at || '',\n    listed_date: new Date().toISOString().slice(0, 10)\n  });\n}\n\n// Highest score first; break ties on who spoke to us most recently.\nout.sort((a, b) => (b.score - a.score) || (String(b.last_activity).localeCompare(String(a.last_activity))));\n\nreturn out.slice(0, DAILY_LIMIT).map((r, i) => ({ json: Object.assign({ rank: i + 1 }, r) }));"
+      },
+      "name": "Score & Rank",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        0
+      ],
+      "id": "938c58eb-0a77-4fd9-945e-b9d1bf09abc1"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "EXAMPLE_SHEET_ID_00000000000000000000",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Priority Calls",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone": "={{ $json.phone }}",
+            "name": "={{ $json.name }}",
+            "rank": "={{ $json.rank }}",
+            "score": "={{ $json.score }}",
+            "tier": "={{ $json.tier }}",
+            "status": "={{ $json.status }}",
+            "summary": "={{ $json.summary }}",
+            "why": "={{ $json.why }}",
+            "destination_country": "={{ $json.destination_country }}",
+            "weight_kg": "={{ $json.weight_kg }}",
+            "volume_cbm": "={{ $json.volume_cbm }}",
+            "cargo_category": "={{ $json.cargo_category }}",
+            "shipping_method": "={{ $json.shipping_method }}",
+            "ad_source": "={{ $json.ad_source }}",
+            "ad_name": "={{ $json.ad_name }}",
+            "ad_id": "={{ $json.ad_id }}",
+            "turns": "={{ $json.turns }}",
+            "first_seen": "={{ $json.first_seen }}",
+            "last_activity": "={{ $json.last_activity }}",
+            "listed_date": "={{ $json.listed_date }}"
+          },
+          "matchingColumns": [
+            "phone"
+          ],
+          "schema": []
+        },
+        "options": {}
+      },
+      "name": "Write Priority List",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "fcc781fd-3ac0-4e96-8564-a2fe85ba737a",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_ME",
+          "name": "Demo googleSheetsOAuth2Api"
+        }
+      },
+      "notes": "The human columns (call_status, called_by, call_date, outcome, objection, notes) are deliberately NOT mapped, so a re-run refreshes the bot's columns and never overwrites what the sales team typed. Left on the default error behaviour so a failed write is loud rather than silently producing an empty call list."
+    }
+  ],
+  "connections": {
+    "Every Morning": {
+      "main": [
+        [
+          {
+            "node": "Read Existing List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Existing List": {
+      "main": [
+        [
+          {
+            "node": "Fetch Transcripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Transcripts": {
+      "main": [
+        [
+          {
+            "node": "Fetch Lead Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Lead Context": {
+      "main": [
+        [
+          {
+            "node": "Score & Rank",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score & Rank": {
+      "main": [
+        [
+          {
+            "node": "Write Priority List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {}
+}

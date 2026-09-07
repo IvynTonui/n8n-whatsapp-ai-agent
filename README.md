@@ -1,5 +1,9 @@
 # AI WhatsApp Automation for a Cross-Border Logistics Company
 **`n8n` · `PostgreSQL` · `LLM API` · `WhatsApp`**
+
+> **Workflow exports** in `/workflows` are sanitized copies (credentials, 
+> endpoints, and identifiers replaced with placeholders) for reference. 
+> Import into n8n to inspect the architecture.
  
 > A conversational WhatsApp agent that handles shipment tracking, shipping quotes, and partner registration through natural conversation, then automatically scores every conversation for buying intent and hands the sales team a ranked daily follow-up list.
  
